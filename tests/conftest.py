@@ -28,6 +28,7 @@ DEFAULT_START_MS = 1_704_067_200_000  # 2024-01-01T00:00:00Z
 
 NETWORK_DISABLED_MESSAGE = "network disabled in unit tests"
 _LOOPBACK_NAMES = frozenset({"127.0.0.1", "::1", "localhost"})
+_PROXY_ENV_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -96,6 +97,13 @@ def _block_network(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
         if _host_needs_dns(host):
             raise RuntimeError(NETWORK_DISABLED_MESSAGE)
         return real_getaddrinfo(host, *args, **kwargs)
+
+    # A proxy listening on loopback would tunnel requests past the guards: send everything direct instead
+    # ("*" also overrides proxies that requests would read from the Windows registry).
+    for name in _PROXY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
 
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)

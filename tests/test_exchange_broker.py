@@ -1225,7 +1225,9 @@ def test_entry_unknown_status_queries_by_client_id(fake: FakeBinance, make_broke
     assert len(fake.calls_to("POST", "/fapi/v1/order")) == 1  # never re-sent blindly
     lookups = [c for c in fake.calls_to("GET", "/fapi/v1/order") if c.params.get("origClientOrderId") == EN]
     assert len(lookups) == 2  # pre-flight + the resolving lookup
-    assert fake.idx("POST", "/fapi/v1/order") < fake.calls.index(lookups[1])
+    # by identity: both lookups are equal Call values (same params, same fake time), so list.index would find the first
+    resolving_idx = next(i for i, c in enumerate(fake.calls) if c is lookups[1])
+    assert fake.idx("POST", "/fapi/v1/order") < resolving_idx
     assert out.filled
     assert out.entry_order is not None and out.entry_order.client_id == EN and out.entry_order.exchange_id == "1001"
     assert out.protective[0].client_id == SL1

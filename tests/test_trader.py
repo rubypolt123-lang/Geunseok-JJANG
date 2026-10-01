@@ -714,6 +714,8 @@ def test_forming_candle_open_used_as_ref_price(rig_factory: Callable[..., Rig]) 
     assert rig.market.mark_calls == 0
 
     # no forming candle for the entry bar -> the mark price is used, fetched once per iteration
+    # (both rigs share the storage fixture: drop rig's open trade so rig2 starts flat)
+    rig.storage.delete_state(active_trade_key(rig.cfg.mode, SYMBOL))
     rig2 = rig_factory(n_bars=21, strategy=ScriptedStrategy({START_MS + 20 * H: SignalAction.LONG}), forming=21)
     rig2.market.mark = 99.0
     rig2.trader.startup()

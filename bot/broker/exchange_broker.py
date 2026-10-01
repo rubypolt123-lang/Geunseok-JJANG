@@ -346,6 +346,8 @@ class ExchangeBroker(Broker):
         self._max_notional: dict[str, float] = {}
         self._filters: dict[str, SymbolFilters] = {}
         self._open_orders: dict[str, _OpenOrderBook] = {}
+        # client ids the exchange rejected as duplicates (-4116): in use even when a lookup cannot find them
+        self._duplicate_client_ids: set[str] = set()
 
     # ------------------------------------------------------------------------------------------ basics
 
@@ -626,13 +628,22 @@ class ExchangeBroker(Broker):
             return dict(found)
         return None
 
-    def _fresh_client_id(self, symbol: str, client_id: str) -> str:
-        """A client id that was never used for an order on ``symbol`` (lookups by it are then unambiguous)."""
+    def _skip_duplicate_ids(self, client_id: str) -> str:
         cid = client_id
+        while cid in self._duplicate_client_ids:
+            cid = next_client_id(cid)
+        return cid
+
+    def _fresh_client_id(self, symbol: str, client_id: str) -> str:
+        """A client id that was never used for an order on ``symbol`` (lookups by it are then unambiguous).
+
+        Ids the exchange already rejected as duplicates are skipped without a lookup.
+        """
+        cid = self._skip_duplicate_ids(client_id)
         for _ in range(MAX_FRESH_ID_STEPS):
             if self._lookup_order(symbol, cid) is None:
                 return cid
-            cid = next_client_id(cid)
+            cid = self._skip_duplicate_ids(next_client_id(cid))
         if self._lookup_order(symbol, cid) is None:
             return cid
         raise BotError(f"no unused client id near {client_id} after {MAX_FRESH_ID_STEPS} steps")
@@ -1124,6 +1135,8 @@ class ExchangeBroker(Broker):
             except (AuthError, IpBannedError):
                 raise
             except BotError as exc:
+                if isinstance(exc, DuplicateClientIdError):
+                    self._duplicate_client_ids.add(entry_client_id)
                 if _non_definitive(exc) or (
                     isinstance(exc, ExchangeError) and not isinstance(exc, (OrderRejectedError, TimestampError))
                 ):
@@ -1409,6 +1422,7 @@ class ExchangeBroker(Broker):
             try:
                 resp = self._signed("POST", ORDER_PATH, params)
             except DuplicateClientIdError as exc:
+                self._duplicate_client_ids.add(client_id)
                 logger.warning("close %s: duplicate client id (%s); re-reading the position", client_id, _err_text(exc))
             except ReduceOnlyRejectedError as exc:
                 logger.warning("close %s rejected as reduce-only (%s); re-reading the position", client_id, _err_text(exc))

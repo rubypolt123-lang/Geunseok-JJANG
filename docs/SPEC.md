@@ -259,11 +259,11 @@ BINANCE_API_SECRET=
 .venv/
 __pycache__/
 *.pyc
-data/
+/data/
 *.db
 *.db-wal
 *.db-shm
-logs/
+/logs/
 .pytest_cache/
 *.tmp
 ```
