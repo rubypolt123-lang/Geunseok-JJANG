@@ -272,3 +272,48 @@ def test_stdin_stop_watcher(text: str) -> None:
     trader = _StopRecorder()
     cli._start_stdin_watcher(None, trader)  # type: ignore[arg-type]
     assert trader.stops == 1  # no stdin at all: never run unsupervised
+
+
+def test_compare_offline_table(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    candle_factory: Callable[..., pd.DataFrame],
+    btc_filters: SymbolFilters,
+) -> None:
+    seed_cache(tmp_path, candle_factory, btc_filters)
+    cfg = write_config(tmp_path)
+    args = ["-c", str(cfg), "compare", "--offline", "--intervals", "1h", *BACKTEST_RANGE, *SMA_PARAMS]
+    assert cli.main(args) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    for label in ("안정형", "기본형", "공격형", "초공격형"):
+        assert f"1h    {label}" in out
+    assert "최대 낙폭" in out and "연 수익률은 표시하지 않습니다" in out  # 27 days: no annualised return
+
+    (csv_file,) = (tmp_path / "data" / "backtests").glob("compare-*.csv")
+    rows = pd.read_csv(csv_file)
+    assert list(rows["profile"]) == ["conservative", "standard", "aggressive", "very_aggressive"]
+    assert (rows["n_trades"] > 0).all()
+    # more risk per trade -> larger moves of equity on the same trades
+    assert rows["max_drawdown"].is_monotonic_increasing
+    assert not (tmp_path / "data" / "bot.db").exists()  # comparisons are not saved as backtest runs
+
+    # a subset, unsupported intervals rejected
+    assert cli.main([*args[:-len(SMA_PARAMS)], *SMA_PARAMS, "--profiles", "standard", "--no-save"]) == cli.EXIT_OK
+    assert "초공격형" not in capsys.readouterr().out.split("위험도별 비교")[1]
+    assert cli.main(["-c", str(cfg), "compare", "--offline", "--intervals", "7m"]) == cli.EXIT_CONFIG
+
+
+def test_backtest_profile_option(
+    tmp_path: Path,
+    candle_factory: Callable[..., pd.DataFrame],
+    btc_filters: SymbolFilters,
+) -> None:
+    seed_cache(tmp_path, candle_factory, btc_filters)
+    cfg = write_config(tmp_path)
+    args = ["-c", str(cfg), "backtest", "--offline", "--profile", "very_aggressive", *BACKTEST_RANGE, *SMA_PARAMS]
+    assert cli.main(args) == cli.EXIT_OK
+    (run_dir,) = (tmp_path / "data" / "backtests").iterdir()
+    result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    risk = result["config"]["risk"]
+    assert (risk["leverage"], risk["risk_per_trade_pct"], risk["take_profit_r"]) == (10, 3.0, None)
+    assert cli.main(["-c", str(cfg), "backtest", "--profile", "yolo"]) == cli.EXIT_CONFIG

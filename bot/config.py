@@ -643,8 +643,12 @@ def with_overrides(
     strategy_name: str | None = None,
     strategy_params: Mapping[str, Any] | None = None,
     initial_balance: float | None = None,
+    risk_overrides: Mapping[str, Any] | None = None,
 ) -> AppConfig:
-    """Re-validated copy with CLI overrides applied (``dataclasses.replace``)."""
+    """Re-validated copy with CLI overrides applied (``dataclasses.replace``).
+
+    ``risk_overrides``: top-level ``risk`` fields (e.g. a ``bot.profiles`` preset); unknown names -> ConfigError.
+    """
     changes: dict[str, Any] = {}
     if mode is not None:
         new_mode = _as_mode(mode)
@@ -668,6 +672,12 @@ def with_overrides(
         balance = _as_float(initial_balance, "initial_balance")
         changes["paper"] = dataclasses.replace(cfg.paper, initial_balance=balance)
         changes["backtest"] = dataclasses.replace(cfg.backtest, initial_balance=balance)
+    if risk_overrides:
+        known = {f.name for f in dataclasses.fields(cfg.risk)} - {"stop_loss"}
+        unknown = sorted(set(risk_overrides) - known)
+        if unknown:
+            raise ConfigError(f"unknown config key: risk.{unknown[0]}")
+        changes["risk"] = dataclasses.replace(cfg.risk, **dict(risk_overrides))
     new_cfg = dataclasses.replace(cfg, **changes)
     _validate(new_cfg)
     return new_cfg

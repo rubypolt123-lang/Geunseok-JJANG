@@ -15,7 +15,16 @@ from pathlib import Path
 import pytest
 
 from bot import cli, launcher
-from bot.config import ENV_TESTNET_KEY, ENV_TESTNET_SECRET, AppConfig, load_config, load_credentials
+from bot.config import (
+    ENV_CONFIRM_LIVE,
+    ENV_LIVE_KEY,
+    ENV_LIVE_SECRET,
+    ENV_TESTNET_KEY,
+    ENV_TESTNET_SECRET,
+    AppConfig,
+    load_config,
+    load_credentials,
+)
 from bot.errors import ConfigError
 from bot.models import Mode
 from tests.conftest import EXAMPLE_CONFIG, REPO_ROOT
@@ -31,14 +40,33 @@ def project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_trade_args_never_live() -> None:
+def test_trade_args() -> None:
     assert launcher.trade_args(Mode.PAPER) == ["trade", "--mode", "paper", "--stop-on-stdin"]
     assert launcher.trade_args(Mode.TESTNET) == ["trade", "--mode", "testnet", "--stop-on-stdin"]
-    with pytest.raises(ConfigError):
-        launcher.trade_args(Mode.LIVE)
+    # live is never named on the command line (the CLI refuses it): it comes from config.yaml
+    assert launcher.trade_args(Mode.LIVE) == ["trade", "--stop-on-stdin"]
     # the CLI accepts exactly what the launcher sends
-    args = cli.build_parser().parse_args(launcher.trade_args(Mode.TESTNET))
+    parser = cli.build_parser()
+    args = parser.parse_args(launcher.trade_args(Mode.TESTNET))
     assert (args.command, args.mode, args.stop_on_stdin) == ("trade", "testnet", True)
+    args = parser.parse_args(launcher.trade_args(Mode.LIVE))
+    assert (args.command, args.mode, args.stop_on_stdin) == ("trade", None, True)
+    args = parser.parse_args(launcher.compare_args("2024-01-01"))
+    assert (args.command, args.start, args.intervals) == ("compare", "2024-01-01", "1h,4h")
+
+
+def test_child_env_carries_live_confirmation_only_when_asked() -> None:
+    base = {"PATH": "/bin", ENV_CONFIRM_LIVE: "YES"}  # even if the user set it globally
+    env = launcher.child_env(base=base)
+    assert ENV_CONFIRM_LIVE not in env
+    assert env["PATH"] == "/bin" and env["PYTHONUTF8"] == "1"
+    assert launcher.child_env({ENV_CONFIRM_LIVE: "YES"}, base={"PATH": "/bin"})[ENV_CONFIRM_LIVE] == "YES"
+
+
+def test_losing_streak_pct() -> None:
+    assert launcher.losing_streak_pct(3.0) == pytest.approx(26.26, abs=0.01)
+    assert launcher.losing_streak_pct(1.0) == pytest.approx(9.56, abs=0.01)
+    assert launcher.losing_streak_pct(2.0, losses=1) == pytest.approx(2.0)
 
 
 def test_stop_command_matches_cli() -> None:
@@ -73,6 +101,8 @@ def test_dashboard_url_and_exit_messages() -> None:
     assert launcher.dashboard_url("127.0.0.1", 8000) == "http://127.0.0.1:8000/"
     assert launcher.dashboard_url("::1", 8080) == "http://[::1]:8080/"
     assert "완료" in launcher.exit_message("backtest", 0)
+    assert "비교" in launcher.exit_message("compare", 0)
+    assert "주문은 보내지 않았습니다" in launcher.exit_message("trade", 130)
     assert "trade.log" in launcher.exit_message("trade", 1)
     assert "설정 오류" in launcher.exit_message("trade", 2)
     assert "-9" in launcher.exit_message("trade", -9)
@@ -100,7 +130,7 @@ def test_set_env_values_replaces_in_place_and_appends() -> None:
 
 
 def test_save_testnet_keys_creates_env_from_example(project: Path) -> None:
-    path = launcher.save_testnet_keys(project, f"  {KEY}\n", SECRET)
+    path = launcher.save_api_keys(project, Mode.TESTNET, f"  {KEY}\n", SECRET)
     text = path.read_text(encoding="utf-8")
     assert f"BINANCE_TESTNET_API_KEY={KEY}\n" in text
     assert f"BINANCE_TESTNET_API_SECRET={SECRET}\n" in text
@@ -110,35 +140,53 @@ def test_save_testnet_keys_creates_env_from_example(project: Path) -> None:
     cfg = dataclasses.replace(load_config(project / "config.yaml"), mode=Mode.TESTNET)
     creds = load_credentials(cfg, environ={})
     assert creds is not None and (creds.api_key, creds.api_secret) == (KEY, SECRET)
-    assert launcher.has_testnet_keys(project / ".env", environ={})
+    assert launcher.has_api_keys(project / ".env", Mode.TESTNET, environ={})
+    assert not launcher.has_api_keys(project / ".env", Mode.LIVE, environ={})
 
     # saving again replaces the pair instead of appending a second one
-    launcher.save_testnet_keys(project, "C" * 64, SECRET)
+    launcher.save_api_keys(project, Mode.TESTNET, "C" * 64, SECRET)
     text = path.read_text(encoding="utf-8")
     assert text.count(ENV_TESTNET_KEY + "=") == 1 and "C" * 64 in text
+
+
+def test_save_live_keys_used_by_live_mode_only(project: Path) -> None:
+    launcher.save_api_keys(project, Mode.TESTNET, KEY, SECRET)
+    path = launcher.save_api_keys(project, Mode.LIVE, "L" * 64, "s" * 64)
+    text = path.read_text(encoding="utf-8")
+    assert f"{ENV_LIVE_KEY}={'L' * 64}\n" in text and f"{ENV_LIVE_SECRET}={'s' * 64}\n" in text
+    assert f"{ENV_TESTNET_KEY}={KEY}\n" in text  # the testnet pair is untouched
+    cfg = load_config(project / "config.yaml")
+    live = load_credentials(dataclasses.replace(cfg, mode=Mode.LIVE), environ={})
+    testnet = load_credentials(dataclasses.replace(cfg, mode=Mode.TESTNET), environ={})
+    assert live is not None and live.api_key == "L" * 64
+    assert testnet is not None and testnet.api_key == KEY
+    assert launcher.has_api_keys(project / ".env", Mode.LIVE, environ={})
 
 
 @pytest.mark.parametrize("bad", ["", "short", f'"{KEY}"', f"{KEY[:30]} {KEY[30:]}", "가" * 64, f"{KEY}#x"])
 def test_save_testnet_keys_rejects_malformed_values(project: Path, bad: str) -> None:
     with pytest.raises(ConfigError):
-        launcher.save_testnet_keys(project, bad, SECRET)
+        launcher.save_api_keys(project, Mode.TESTNET, bad, SECRET)
     with pytest.raises(ConfigError):
-        launcher.save_testnet_keys(project, KEY, bad)
+        launcher.save_api_keys(project, Mode.LIVE, KEY, bad)
     assert not (project / ".env").exists()
 
 
-def test_has_testnet_keys_reads_env_file_and_environment(tmp_path: Path) -> None:
+def test_has_api_keys_reads_env_file_and_environment(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
-    assert not launcher.has_testnet_keys(env_file, environ={})
+    assert not launcher.has_api_keys(env_file, Mode.TESTNET, environ={})
     env_file.write_text(f"{ENV_TESTNET_KEY}={KEY}\n{ENV_TESTNET_SECRET}=\n", encoding="utf-8")
-    assert not launcher.has_testnet_keys(env_file, environ={})  # the secret is empty
-    assert launcher.has_testnet_keys(env_file, environ={ENV_TESTNET_SECRET: SECRET})
+    assert not launcher.has_api_keys(env_file, Mode.TESTNET, environ={})  # the secret is empty
+    assert launcher.has_api_keys(env_file, Mode.TESTNET, environ={ENV_TESTNET_SECRET: SECRET})
+    assert not launcher.has_api_keys(env_file, Mode.LIVE, environ={ENV_TESTNET_SECRET: SECRET})
 
 
 def test_config_summary(app_config: AppConfig) -> None:
     text = launcher.config_summary(app_config)
     assert "BTCUSDT · 1h 봉 · 전략 ma_cross (fast_period=20, slow_period=50, ma_type=EMA, allow_short=True)" in text
-    assert "레버리지 3배 · 1회 위험 1% · 손절 ATR×2 · 익절 2R · 일일 손실 한도 5%" in text
+    assert "위험도: 기본형 — 레버리지 3배 · 손절 1회에 자산의 1% · 손절 거리 ATR×2 · 익절 2R" in text
+    custom = dataclasses.replace(app_config, risk=dataclasses.replace(app_config.risk, leverage=4))
+    assert "위험도: 사용자 설정" in launcher.config_summary(custom)
 
 
 # -- child processes ---------------------------------------------------------------------------------------
@@ -271,8 +319,9 @@ def tk_root() -> Iterator[launcher.tk.Tk]:
 def test_window_smoke(project: Path, tk_root: launcher.tk.Tk) -> None:
     app = launcher.LauncherApp(tk_root, project_dir=project)
     tk_root.update()
-    assert "BTCUSDT" in app.summary_var.get()
-    assert "없음" in app.keys_var.get()
+    assert "BTCUSDT" in app.summary_var.get() and "기본형" in app.summary_var.get()
+    assert "테스트넷: 없음" in app.keys_var.get()
+    assert app.profile_var.get() == "standard" and app.interval_var.get() == "1h"
     assert app.start_var.get() == "2024-01-01"
     assert str(app.backtest_btn.cget("state")) == "normal"
     assert str(app.trade_stop_btn.cget("state")) == "disabled"
@@ -282,8 +331,8 @@ def test_window_smoke(project: Path, tk_root: launcher.tk.Tk) -> None:
     dialog.key_var.set(KEY)
     dialog.secret_var.set(SECRET)
     dialog.save()
-    assert launcher.has_testnet_keys(project / ".env", environ={})
-    assert "입력됨" in app.keys_var.get()
+    assert launcher.has_api_keys(project / ".env", Mode.TESTNET, environ={})
+    assert "테스트넷: 입력됨" in app.keys_var.get() and "실거래: 없음" in app.keys_var.get()
 
     # a broken config disables the actions instead of crashing
     (project / "config.yaml").write_text("mode: [\n", encoding="utf-8")
@@ -296,3 +345,87 @@ def test_window_smoke(project: Path, tk_root: launcher.tk.Tk) -> None:
     assert "something" in app.log_text.get("1.0", "end")
     app.on_close()  # nothing running: closes at once
     assert app._destroyed
+
+
+class _FakeLiveDialog:
+    """Stands in for LiveConfirmDialog: answers at once, as if the word was (not) typed."""
+
+    answer = True
+
+    def __init__(self, app: launcher.LauncherApp, cfg: AppConfig) -> None:
+        self.confirmed = _FakeLiveDialog.answer
+        self.win = launcher.tk.Toplevel(app.root)
+        self.win.after(10, self.win.destroy)
+
+
+def test_window_trading_modes_and_presets(
+    project: Path, tk_root: launcher.tk.Tk, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[dict[str, object]] = []
+
+    def fake_start(self: launcher.ManagedProcess, cmd: list[str], **kwargs: object) -> None:
+        started.append({"name": self.name, "cmd": cmd, **kwargs})
+
+    monkeypatch.setattr(launcher.ManagedProcess, "start", fake_start)
+    monkeypatch.setattr(launcher, "LiveConfirmDialog", _FakeLiveDialog)
+    asked: list[str] = []
+    monkeypatch.setattr(launcher.messagebox, "askyesno", lambda title, msg, **kw: asked.append(msg) or True)
+    monkeypatch.setattr(launcher.messagebox, "showinfo", lambda *a, **kw: None)
+    monkeypatch.setattr(launcher, "KeyDialog", lambda app, mode: started.append({"key_dialog": mode}))
+    app = launcher.LauncherApp(tk_root, project_dir=project)
+    config = project / "config.yaml"
+
+    # preset + interval are written to config.yaml (aggressive ones ask first)
+    app.profile_var.set("very_aggressive")
+    app.interval_var.set("4h")
+    app.apply_profile()
+    assert asked and "26%" in asked[0]
+    cfg = load_config(config)
+    assert (cfg.interval, cfg.risk.leverage, cfg.risk.risk_per_trade_pct, cfg.risk.take_profit_r) == ("4h", 10, 3.0, None)
+    assert "초공격형" in app.summary_var.get()
+
+    # paper: --mode paper, no live confirmation in the child environment
+    app.mode_var.set("paper")
+    app.start_trading()
+    assert started[-1]["cmd"][-4:] == ["trade", "--mode", "paper", "--stop-on-stdin"]
+    assert not started[-1]["extra_env"]
+
+    # live without keys: the key dialog opens instead, nothing starts, config untouched
+    app.mode_var.set("live")
+    n = len(started)
+    app.start_trading()
+    assert started[n:] == [{"key_dialog": Mode.LIVE}]
+    assert load_config(config).mode is Mode.PAPER
+
+    # live, dialog cancelled: nothing starts, config stays paper
+    launcher.save_api_keys(project, Mode.LIVE, KEY, SECRET)
+    _FakeLiveDialog.answer = False
+    try:
+        app.start_trading()
+    finally:
+        _FakeLiveDialog.answer = True
+    assert len(started) == n + 1 and load_config(config).mode is Mode.PAPER
+
+    # live, confirmed: mode live in config.yaml + CONFIRM_LIVE_TRADING for this child only
+    app.start_trading()
+    assert started[-1]["cmd"][-2:] == ["trade", "--stop-on-stdin"]
+    assert started[-1]["extra_env"] == {ENV_CONFIRM_LIVE: "YES"}
+    assert load_config(config).mode is Mode.LIVE
+
+    # starting paper again puts config.yaml back to paper
+    app.mode_var.set("paper")
+    app.start_trading()
+    assert load_config(config).mode is Mode.PAPER
+
+
+def test_live_confirm_dialog_needs_the_word(project: Path, tk_root: launcher.tk.Tk) -> None:
+    app = launcher.LauncherApp(tk_root, project_dir=project)
+    dialog = launcher.LiveConfirmDialog(app, load_config(project / "config.yaml"))
+    assert str(dialog.start_btn.cget("state")) == "disabled"
+    dialog.word_var.set("실거")
+    dialog.confirm()
+    assert not dialog.confirmed and dialog.win.winfo_exists()
+    dialog.word_var.set(" 실거래 ")
+    assert str(dialog.start_btn.cget("state")) == "normal"
+    dialog.confirm()
+    assert dialog.confirmed

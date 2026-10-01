@@ -1,6 +1,6 @@
 """Command line interface (SPEC §12.1): ``python -m bot <command>``.
 
-Commands: ``download``, ``backtest``, ``trade``, ``dashboard``, ``strategies``.
+Commands: ``download``, ``backtest``, ``compare``, ``trade``, ``dashboard``, ``strategies``.
 Exit codes: 0 success (also after a user stop of ``trade``); 1 runtime error; 2 ConfigError / usage;
 3 live trading not confirmed; 130 interrupted (or ``trade`` aborted before startup finished).
 """
@@ -12,7 +12,9 @@ import dataclasses
 import logging
 import sys
 import threading
+import time
 import traceback
+import unicodedata
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any, Final, TextIO
@@ -47,7 +49,9 @@ from bot.data.downloader import (
 from bot.errors import BotError, ConfigError, DataError, LiveTradingNotConfirmed
 from bot.exchange.market import MarketData
 from bot.exchange.rest import BinanceRestClient
-from bot.models import Mode
+from bot.fsutil import atomic_write_text
+from bot.models import Mode, to_jsonable
+from bot.profiles import PROFILE_KEYS, PROFILES, apply_profile, get_profile
 from bot.storage import Storage
 from bot.strategy import available_strategies, create_strategy, get_strategy_class, load_strategy_modules
 from bot.timeutil import interval_to_ms, ms_to_iso, now_ms, parse_date_ms
@@ -153,6 +157,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-funding", action="store_true", help="펀딩비 미반영")
     p.add_argument("--offline", action="store_true", help="네트워크 없이 캐시 데이터만 사용")
     p.add_argument("--no-save", action="store_true", help="결과 파일/DB 저장 안 함")
+    p.add_argument("--profile", choices=PROFILE_KEYS, help="위험도 프리셋으로 risk 설정 덮어쓰기")
+
+    p = sub.add_parser("compare", parents=[common], help="위험도(프리셋)별 · 봉 간격별 백테스트 비교표")
+    p.add_argument("--symbol", help="심볼 (예: BTCUSDT)")
+    p.add_argument("--start", metavar="DATE", help="시작일 (기본값: backtest.start)")
+    p.add_argument("--end", metavar="DATE", help="종료일 (기본값: backtest.end 또는 현재)")
+    p.add_argument("--intervals", default="1h,4h", metavar="LIST", help="쉼표로 구분한 봉 간격 (기본값: 1h,4h)")
+    p.add_argument(
+        "--profiles", metavar="LIST", help=f"쉼표로 구분한 프리셋 (기본값: 전부 = {','.join(PROFILE_KEYS)})"
+    )
+    p.add_argument("--strategy", metavar="NAME", help="전략 이름")
+    p.add_argument("--param", action="append", type=parse_param, default=[], metavar="KEY=VALUE", help="전략 파라미터")
+    p.add_argument("--initial-balance", type=float, metavar="USDT", help="초기 자산 (USDT)")
+    p.add_argument("--no-funding", action="store_true", help="펀딩비 미반영")
+    p.add_argument("--offline", action="store_true", help="네트워크 없이 캐시 데이터만 사용")
+    p.add_argument("--no-save", action="store_true", help="비교표 CSV 저장 안 함")
 
     p = sub.add_parser("trade", parents=[common], help="자동매매 실행 (기본: paper)")
     p.add_argument("--once", action="store_true", help="한 번만 실행하고 종료")
@@ -183,6 +203,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _out(text: str = "") -> None:
     print(text, flush=True)
+
+
+def time_stamp() -> str:
+    return time.strftime("%Y%m%d-%H%M%S", time.gmtime())
 
 
 def _config_path(args: argparse.Namespace) -> str:
@@ -316,31 +340,47 @@ def _cmd_download(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _cmd_backtest(args: argparse.Namespace) -> int:
-    # 1. config + overrides, strategy
-    cfg = with_overrides(
-        _load_cfg(args),
-        symbol=args.symbol,
-        interval=args.interval,
-        strategy_name=args.strategy,
-        strategy_params=_params(args.param),
-        initial_balance=args.initial_balance,
-    )
-    _setup_logging(cfg, "backtest")
-    _add_strategy_path(cfg)
-    load_strategy_modules(cfg.strategy.extra_modules)
-    strategy = create_strategy(cfg.strategy.name, cfg.strategy.params)
+@dataclasses.dataclass(frozen=True, slots=True)
+class BacktestInputs:
+    """Everything a backtest of one symbol/interval needs (shared by ``backtest`` and ``compare``)."""
+
+    candles: pd.DataFrame
+    funding: pd.DataFrame | None
+    filters: Any
+    start_ms: int
+    end_ms: int
+    use_funding: bool
+
+    def coverage(self) -> dict[str, Any]:
+        rows = int(len(self.funding)) if self.funding is not None else 0
+        return {
+            "included": self.use_funding,
+            "rows": rows,
+            "first": int(self.funding["funding_time"].iloc[0]) if self.funding is not None and rows else None,
+            "last": int(self.funding["funding_time"].iloc[-1]) if self.funding is not None and rows else None,
+        }
+
+
+def load_backtest_inputs(
+    cfg: AppConfig,
+    warmup_bars: int,
+    *,
+    start_text: str | None,
+    end_text: str | None,
+    offline: bool,
+    no_funding: bool,
+) -> BacktestInputs:
+    """Download (unless offline) and load candles, funding and filters for ``cfg.symbol`` / ``cfg.interval``."""
     interval_ms = interval_to_ms(cfg.interval)
-    start_ms = _parse_date(args.start or cfg.backtest.start, "--start")
-    end_text = args.end or cfg.backtest.end
+    start_ms = _parse_date(start_text or cfg.backtest.start, "--start")
+    end_text = end_text or cfg.backtest.end
     cache = cfg.cache_dir
-    # 2. funding
-    use_funding = bool(cfg.backtest.include_funding and not args.no_funding)
+    use_funding = bool(cfg.backtest.include_funding and not no_funding)
 
     client: BinanceRestClient | None = None
     try:
         market: MarketData | None = None
-        if not args.offline:
+        if not offline:
             client = BinanceRestClient(MAINNET_REST_URL, recv_window_ms=cfg.execution.recv_window_ms)
             market = MarketData(client)
         if end_text:
@@ -349,10 +389,10 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
             end_ms = market.server_time() if market is not None else now_ms()
         if end_ms <= start_ms:
             raise ConfigError("backtest end must be after start / 종료일은 시작일 이후여야 합니다")
-        warmup_ms = (int(strategy.warmup_bars) + int(cfg.risk.stop_loss.atr_period) + 5) * interval_ms
+        warmup_ms = (int(warmup_bars) + int(cfg.risk.stop_loss.atr_period) + 5) * interval_ms
         data_start = start_ms - warmup_ms
 
-        # 3. data (mainnet public data; never demo klines)
+        # mainnet public data; never demo klines
         if market is not None:
             download_klines(market, cache, cfg.symbol, cfg.interval, data_start, end_ms)
             if use_funding:
@@ -364,7 +404,6 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
         if client is not None:
             client.close()
 
-    # 4. candles
     df = load_klines(cache, cfg.symbol, cfg.interval, data_start, end_ms)
     if df.empty:
         raise DataError(
@@ -372,13 +411,12 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
             f"--symbol {cfg.symbol} --interval {cfg.interval} (캐시된 캔들이 없습니다)"
         )
 
-    # 5. funding (online and offline)
     funding: pd.DataFrame | None = None
     if use_funding:
         funding = load_funding(cache, cfg.symbol, data_start, end_ms)
         problem = funding_coverage_problem(funding, start_ms, df)
         if problem is not None:
-            if args.offline and len(funding) == 0:
+            if offline and len(funding) == 0:
                 raise DataError(
                     f"no cached funding for {cfg.symbol}; run: python -m bot download --symbol {cfg.symbol} "
                     "... or use --no-funding (캐시된 펀딩비가 없습니다. download 를 실행하거나 --no-funding 을 쓰세요)"
@@ -386,34 +424,57 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
             logger.warning(
                 "펀딩비 데이터가 기간 전체를 덮지 않습니다 / funding data does not cover the whole period: %s", problem
             )
+    return BacktestInputs(df, funding, filters, start_ms, end_ms, use_funding)
+
+
+def _cmd_backtest(args: argparse.Namespace) -> int:
+    # 1. config + overrides, strategy
+    cfg = with_overrides(
+        _load_cfg(args),
+        symbol=args.symbol,
+        interval=args.interval,
+        strategy_name=args.strategy,
+        strategy_params=_params(args.param),
+        initial_balance=args.initial_balance,
+    )
+    if args.profile:
+        cfg = apply_profile(cfg, get_profile(args.profile))
+    _setup_logging(cfg, "backtest")
+    _add_strategy_path(cfg)
+    load_strategy_modules(cfg.strategy.extra_modules)
+    strategy = create_strategy(cfg.strategy.name, cfg.strategy.params)
+
+    # 2.-5. data, funding
+    inputs = load_backtest_inputs(
+        cfg,
+        strategy.warmup_bars,
+        start_text=args.start,
+        end_text=args.end,
+        offline=args.offline,
+        no_funding=args.no_funding,
+    )
+    df = inputs.candles
 
     # 6. snapshot
-    rows = int(len(funding)) if funding is not None else 0
-    config_snapshot = cfg.to_dict() | {
-        "funding_coverage": {
-            "included": use_funding,
-            "rows": rows,
-            "first": int(funding["funding_time"].iloc[0]) if funding is not None and rows else None,
-            "last": int(funding["funding_time"].iloc[-1]) if funding is not None and rows else None,
-        }
-    }
+    config_snapshot = cfg.to_dict() | {"funding_coverage": inputs.coverage()}
 
     # 7. run
     _out(
         f"백테스트 / backtest: {cfg.symbol} {cfg.interval} {strategy.describe()} "
-        f"{ms_to_iso(start_ms)} ~ {ms_to_iso(end_ms)} (캔들 {len(df):,}개, 펀딩비 {'반영' if use_funding else '미반영'})"
+        f"{ms_to_iso(inputs.start_ms)} ~ {ms_to_iso(inputs.end_ms)} "
+        f"(캔들 {len(df):,}개, 펀딩비 {'반영' if inputs.use_funding else '미반영'})"
     )
     result = run_backtest(
         df,
         strategy,
         symbol=cfg.symbol,
         interval=cfg.interval,
-        filters=filters,
+        filters=inputs.filters,
         risk=cfg.risk,
         execution=cfg.execution,
         initial_balance=cfg.backtest.initial_balance,
-        funding=funding,
-        trade_start_ms=start_ms,
+        funding=inputs.funding,
+        trade_start_ms=inputs.start_ms,
         config_snapshot=config_snapshot,
     )
 
@@ -431,6 +492,132 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     else:
         _out("결과 저장 안 함 / not saved (--no-save)")
     return EXIT_OK
+
+
+COMPARE_MIN_DAYS_FOR_CAGR: Final = 180  # annualising a few weeks gives absurd numbers
+COMPARE_COLUMNS: Final[tuple[tuple[str, str], ...]] = (
+    ("final_equity", "최종 자산"),
+    ("total_return", "총 수익률"),
+    ("cagr", "연 수익률"),
+    ("max_drawdown", "최대 낙폭"),
+    ("n_trades", "거래 수"),
+    ("win_rate", "승률"),
+    ("profit_factor", "손익비"),
+    ("n_liquidations", "강제청산"),
+)
+
+
+def _fmt_compare(key: str, value: Any) -> str:
+    v = to_jsonable(value)
+    if v is None or isinstance(v, bool):
+        return "-"
+    if key in ("total_return", "cagr", "win_rate"):
+        return f"{float(v) * 100:+.1f}%" if key != "win_rate" else f"{float(v) * 100:.1f}%"
+    if key == "max_drawdown":
+        dd = abs(float(v)) * 100
+        return f"-{dd:.1f}%" if round(dd, 1) else "0.0%"
+    if key == "final_equity":
+        return f"{float(v):,.0f}"
+    if key == "profit_factor":
+        return f"{float(v):.2f}"
+    return str(int(v))
+
+
+def _cmd_compare(args: argparse.Namespace) -> int:
+    base = with_overrides(
+        _load_cfg(args),
+        symbol=args.symbol,
+        strategy_name=args.strategy,
+        strategy_params=_params(args.param),
+        initial_balance=args.initial_balance,
+    )
+    intervals = [i.strip() for i in str(args.intervals).split(",") if i.strip()] or [base.interval]
+    for interval in intervals:
+        if interval not in SUPPORTED_INTERVALS:
+            raise ConfigError(f"unsupported interval {interval!r}; choose from {', '.join(SUPPORTED_INTERVALS)}")
+    chosen = [get_profile(k.strip()) for k in str(args.profiles).split(",") if k.strip()] if args.profiles else list(PROFILES)
+    _setup_logging(base, "compare")
+    _add_strategy_path(base)
+    load_strategy_modules(base.strategy.extra_modules)
+    describe = create_strategy(base.strategy.name, base.strategy.params).describe()
+
+    rows: list[dict[str, Any]] = []
+    period = ""
+    short_period = False
+    for interval in intervals:
+        cfg = with_overrides(base, interval=interval)
+        warmup = create_strategy(cfg.strategy.name, cfg.strategy.params).warmup_bars
+        _out(f"데이터 준비 / loading data: {cfg.symbol} {interval} ...")
+        inputs = load_backtest_inputs(
+            cfg, warmup, start_text=args.start, end_text=args.end, offline=args.offline, no_funding=args.no_funding
+        )
+        period = f"{ms_to_iso(inputs.start_ms)[:10]} ~ {ms_to_iso(inputs.end_ms)[:10]}"
+        short_period = (inputs.end_ms - inputs.start_ms) < COMPARE_MIN_DAYS_FOR_CAGR * 86_400_000
+        for profile in chosen:
+            run_cfg = apply_profile(cfg, profile)
+            result = run_backtest(
+                inputs.candles,
+                create_strategy(run_cfg.strategy.name, run_cfg.strategy.params),
+                symbol=run_cfg.symbol,
+                interval=interval,
+                filters=inputs.filters,
+                risk=run_cfg.risk,
+                execution=run_cfg.execution,
+                initial_balance=run_cfg.backtest.initial_balance,
+                funding=inputs.funding,
+                trade_start_ms=inputs.start_ms,
+                config_snapshot=run_cfg.to_dict() | {"funding_coverage": inputs.coverage(), "profile": profile.key},
+            )
+            row = {"interval": interval, "profile": profile.key, "label": profile.label}
+            row.update({key: to_jsonable(result.metrics.get(key)) for key, _ in COMPARE_COLUMNS})
+            rows.append(row)
+            _out(f"  {interval} {profile.label}: 완료 / done")
+
+    # table (Korean labels are 2 columns wide in a console; pad by display width)
+    header = ["간격", "위험도", *(label for _, label in COMPARE_COLUMNS)]
+    table = [header] + [
+        [
+            r["interval"],
+            r["label"],
+            *("-" if key == "cagr" and short_period else _fmt_compare(key, r[key]) for key, _ in COMPARE_COLUMNS),
+        ]
+        for r in rows
+    ]
+    widths = [max(_display_width(row[c]) for row in table) for c in range(len(header))]
+    _out("")
+    _out(
+        f"위험도별 비교 / risk comparison: {base.symbol} · {describe} · {period} · "
+        f"시작 자산 {base.backtest.initial_balance:,.0f} USDT · 펀딩비 {'반영' if not args.no_funding and base.backtest.include_funding else '미반영'}"
+    )
+    for n, row in enumerate(table):
+        cells = [_pad(cell, widths[c], left=c < 2) for c, cell in enumerate(row)]
+        _out("  ".join(cells))
+        if n == 0:
+            _out("  ".join("-" * w for w in widths))
+    _out("")
+    _out("최대 낙폭 = 기간 중 자산이 고점에서 가장 많이 줄었던 비율입니다. 같은 일이 다시 일어나도 견딜 수 있는 위험도를 고르세요.")
+    if short_period:
+        _out(f"기간이 {COMPARE_MIN_DAYS_FOR_CAGR}일보다 짧아 연 수익률은 표시하지 않습니다. 1년 이상으로 비교하는 것이 좋습니다.")
+    _out("과거 성과는 미래 수익을 보장하지 않습니다 / past results do not guarantee future returns.")
+
+    if not args.no_save:
+        out = cfg.resolve_path(base.backtest.results_dir) / f"compare-{time_stamp()}.csv"
+        lines = [",".join(["interval", "profile", *(key for key, _ in COMPARE_COLUMNS)])]
+        for r in rows:
+            values = ["" if r[key] is None else str(r[key]) for key, _ in COMPARE_COLUMNS]
+            lines.append(",".join([r["interval"], r["profile"], *values]))
+        atomic_write_text(out, "\n".join(lines) + "\n")
+        _out(f"결과 파일 / saved: {out}")
+    return EXIT_OK
+
+
+def _display_width(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _pad(text: str, width: int, *, left: bool) -> str:
+    fill = " " * max(0, width - _display_width(text))
+    return text + fill if left else fill + text
 
 
 def _cmd_trade(args: argparse.Namespace) -> int:
@@ -514,6 +701,7 @@ def _cmd_strategies(args: argparse.Namespace) -> int:
 _COMMANDS: Final[dict[str, Callable[[argparse.Namespace], int]]] = {
     "download": _cmd_download,
     "backtest": _cmd_backtest,
+    "compare": _cmd_compare,
     "trade": _cmd_trade,
     "dashboard": _cmd_dashboard,
     "strategies": _cmd_strategies,
