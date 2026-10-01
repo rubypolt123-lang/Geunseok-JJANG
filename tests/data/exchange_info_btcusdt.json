@@ -1,0 +1,38 @@
+{
+  "timezone": "UTC",
+  "serverTime": 1790770782215,
+  "rateLimits": [
+    {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400},
+    {"rateLimitType": "ORDERS", "interval": "MINUTE", "intervalNum": 1, "limit": 1200},
+    {"rateLimitType": "ORDERS", "interval": "SECOND", "intervalNum": 10, "limit": 300}
+  ],
+  "exchangeFilters": [],
+  "assets": [],
+  "symbols": [
+    {
+      "symbol": "BTCUSDT",
+      "pair": "BTCUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "baseAsset": "BTC",
+      "quoteAsset": "USDT",
+      "marginAsset": "USDT",
+      "pricePrecision": 2,
+      "quantityPrecision": 3,
+      "triggerProtect": "0.0500",
+      "liquidationFee": "0.012500",
+      "marketTakeBound": "0.05",
+      "filters": [
+        {"filterType": "PRICE_FILTER", "tickSize": "0.10", "minPrice": "556.80", "maxPrice": "4529764"},
+        {"filterType": "LOT_SIZE", "stepSize": "0.001", "maxQty": "1000", "minQty": "0.001"},
+        {"filterType": "MARKET_LOT_SIZE", "minQty": "0.001", "stepSize": "0.001", "maxQty": "120"},
+        {"filterType": "MAX_NUM_ORDERS", "limit": 200},
+        {"filterType": "MIN_NOTIONAL", "notional": "50"},
+        {"filterType": "PERCENT_PRICE", "multiplierUp": "1.0500", "multiplierDown": "0.9500", "multiplierDecimal": "4"},
+        {"filterType": "POSITION_RISK_CONTROL", "positionControlSide": "NONE"}
+      ],
+      "orderTypes": ["LIMIT", "MARKET", "STOP", "STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET", "TRAILING_STOP_MARKET"],
+      "timeInForce": ["GTC", "IOC", "FOK", "GTX", "GTD"]
+    }
+  ]
+}

@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>바이낸스 선물 자동매매 대시보드</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css">
+  <!-- 차트 라이브러리 (CDN). 불러오지 못해도 표와 상태 정보는 동작합니다. -->
+  <script id="lwc-script" src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js" async></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="title">바이낸스 선물 자동매매 대시보드</h1>
+      <div class="badges">
+        <span id="mode-badge" class="badge badge-mode">모드 확인 중</span>
+        <span class="badge badge-readonly" title="이 화면에서는 주문을 낼 수 없습니다">읽기 전용</span>
+        <span id="conn-badge" class="badge badge-error" hidden>서버 연결 실패</span>
+      </div>
+      <div class="refreshed">마지막 새로고침: <span id="last-refresh">-</span> <span class="muted">(KST)</span></div>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 1~2. 봇 상태 -->
+    <section class="card" id="status-section" aria-labelledby="status-title">
+      <div class="card-head">
+        <h2 id="status-title">봇 상태</h2>
+        <span id="state-badge" class="badge">-</span>
+      </div>
+      <p id="status-empty" class="empty" hidden>아직 실행된 트레이더가 없습니다. <code>python -m bot trade</code> 를 실행하면 상태가 표시됩니다.</p>
+      <dl class="kv-grid" id="status-grid">
+        <div><dt>모드</dt><dd id="st-mode">-</dd></div>
+        <div><dt>심볼</dt><dd id="st-symbol">-</dd></div>
+        <div><dt>간격</dt><dd id="st-interval">-</dd></div>
+        <div><dt>전략</dt><dd id="st-strategy">-</dd></div>
+        <div><dt>상태</dt><dd id="st-state">-</dd></div>
+        <div><dt>하트비트</dt><dd id="st-heartbeat">-</dd></div>
+        <div><dt>지갑 잔고</dt><dd id="st-wallet" class="num">-</dd></div>
+        <div><dt>평가 자산</dt><dd id="st-equity" class="num">-</dd></div>
+        <div><dt>사용 가능 잔고</dt><dd id="st-available" class="num">-</dd></div>
+        <div><dt>미실현 손익</dt><dd id="st-upnl" class="num">-</dd></div>
+        <div class="wide"><dt>마지막 신호</dt><dd id="st-signal">-</dd></div>
+        <div class="wide"><dt>진입 차단 사유</dt><dd id="st-blocked">-</dd></div>
+        <div class="wide"><dt>메시지</dt><dd id="st-message">-</dd></div>
+      </dl>
+    </section>
+
+    <div class="two-col">
+      <!-- 3. 포지션 -->
+      <section class="card" aria-labelledby="position-title">
+        <div class="card-head"><h2 id="position-title">포지션</h2></div>
+        <p id="position-empty" class="empty">포지션 없음</p>
+        <dl class="kv-grid" id="position-grid" hidden>
+          <div><dt>방향</dt><dd id="pos-direction">-</dd></div>
+          <div><dt>수량</dt><dd id="pos-qty" class="num">-</dd></div>
+          <div><dt>진입가</dt><dd id="pos-entry" class="num">-</dd></div>
+          <div><dt>마크가</dt><dd id="pos-mark" class="num">-</dd></div>
+          <div><dt>미실현 손익</dt><dd id="pos-upnl" class="num">-</dd></div>
+          <div><dt>청산가</dt><dd id="pos-liq" class="num">-</dd></div>
+          <div><dt>레버리지</dt><dd id="pos-leverage" class="num">-</dd></div>
+          <div><dt>격리 증거금</dt><dd id="pos-margin" class="num">-</dd></div>
+        </dl>
+      </section>
+
+      <!-- 4. 보호 주문 -->
+      <section class="card" aria-labelledby="protective-title">
+        <div class="card-head"><h2 id="protective-title">보호 주문</h2></div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>종류</th><th>주문 방향</th><th class="num">트리거 가격</th><th>상태</th><th>주문 ID</th></tr>
+            </thead>
+            <tbody id="protective-body">
+              <tr class="empty-row"><td colspan="5">보호 주문 없음</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- 5. 캔들 차트 -->
+    <section class="card" aria-labelledby="candle-title">
+      <div class="card-head">
+        <h2 id="candle-title">캔들 차트</h2>
+        <span id="candle-subtitle" class="muted"></span>
+      </div>
+      <div class="chart-box">
+        <div id="candle-legend" class="chart-legend" aria-live="off"></div>
+        <div id="candle-chart" class="chart chart-candles" role="img" aria-label="캔들 차트와 진입·청산 표시"></div>
+        <p class="chart-message" id="candle-message" hidden></p>
+      </div>
+      <p class="hint muted">▲ 롱 진입 · ▼ 숏 진입 · ● 청산(사유 표시). 시간은 한국 시간(KST)입니다.</p>
+    </section>
+
+    <!-- 6. 자산 곡선 -->
+    <section class="card" aria-labelledby="equity-title">
+      <div class="card-head">
+        <h2 id="equity-title">자산 곡선</h2>
+        <span id="equity-subtitle" class="muted"></span>
+      </div>
+      <div class="chart-box">
+        <div id="equity-legend" class="chart-legend" aria-live="off"></div>
+        <div id="equity-chart" class="chart chart-line" role="img" aria-label="평가 자산 추이"></div>
+        <p class="chart-message" id="equity-message" hidden></p>
+      </div>
+    </section>
+
+    <!-- 7. 거래 내역 -->
+    <section class="card" aria-labelledby="trades-title">
+      <div class="card-head">
+        <h2 id="trades-title">거래 내역</h2>
+        <span id="trades-subtitle" class="muted"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>진입 시각</th><th>청산 시각</th><th>방향</th><th class="num">수량</th><th class="num">진입가</th>
+              <th class="num">청산가</th><th>청산 사유</th><th class="num">수수료</th><th class="num">펀딩비</th>
+              <th class="num">순손익</th><th class="num">R</th>
+            </tr>
+          </thead>
+          <tbody id="trades-body">
+            <tr class="empty-row"><td colspan="11">거래 내역 없음</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 8. 최근 이벤트 -->
+    <section class="card" aria-labelledby="events-title">
+      <div class="card-head"><h2 id="events-title">최근 이벤트</h2></div>
+      <ul class="event-list" id="events-list">
+        <li class="empty">이벤트 없음</li>
+      </ul>
+    </section>
+
+    <!-- 9. 백테스트 결과 -->
+    <section class="card" aria-labelledby="backtests-title">
+      <div class="card-head">
+        <h2 id="backtests-title">백테스트 결과</h2>
+        <span class="muted">행을 클릭하면 상세 결과를 볼 수 있습니다</span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table clickable">
+          <thead>
+            <tr>
+              <th>실행 ID</th><th>생성 시각</th><th>심볼</th><th>간격</th><th>전략</th>
+              <th class="num">총 수익률</th><th class="num">최대 낙폭</th><th class="num">샤프 지수</th>
+              <th class="num">거래 수</th><th class="num">승률</th>
+            </tr>
+          </thead>
+          <tbody id="backtests-body">
+            <tr class="empty-row"><td colspan="10">백테스트 결과 없음. <code>python -m bot backtest</code> 로 실행하세요.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div id="bt-detail" class="bt-detail" hidden>
+        <div class="card-head">
+          <h3 id="bt-detail-title">백테스트 상세</h3>
+          <button type="button" id="bt-detail-close" class="btn-ghost">닫기</button>
+        </div>
+        <p id="bt-detail-info" class="muted"></p>
+        <dl class="metrics-grid" id="bt-metrics"></dl>
+        <div class="chart-box">
+          <div id="bt-equity-legend" class="chart-legend" aria-live="off"></div>
+          <div id="bt-equity-chart" class="chart chart-line" role="img" aria-label="백테스트 자산 곡선"></div>
+          <p class="chart-message" id="bt-equity-message" hidden></p>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>진입 시각</th><th>청산 시각</th><th>방향</th><th class="num">수량</th><th class="num">진입가</th>
+                <th class="num">청산가</th><th>청산 사유</th><th class="num">수수료</th><th class="num">펀딩비</th>
+                <th class="num">순손익</th><th class="num">R</th>
+              </tr>
+            </thead>
+            <tbody id="bt-trades-body">
+              <tr class="empty-row"><td colspan="11">거래 없음</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 10. 푸터 -->
+  <footer class="footer">
+    <p>본 소프트웨어는 투자 조언이 아니며, 모든 거래의 책임은 사용자에게 있습니다.</p>
+    <p class="muted">읽기 전용 대시보드 · 로컬(127.0.0.1) 전용 · <span id="app-version"></span></p>
+  </footer>
+</body>
+</html>
