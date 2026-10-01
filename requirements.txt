@@ -1,0 +1,16 @@
+# Runtime dependencies for binance-futures-bot.
+# Lower bounds = versions verified on CPython 3.14.6 (win_amd64) on 2026-09-30,
+# all installed from binary wheels (pip --only-binary ":all:"), no local compile.
+# Major-version caps only where a major bump is known to be breaking.
+# Exact reproducible set: requirements-lock.txt
+#
+# Install:
+#   .\.venv\Scripts\python.exe -m pip install --only-binary ":all:" -r requirements.txt
+
+requests>=2.34.2,<3        # REST client for Binance public/signed endpoints
+numpy>=2.5.3,<3            # cp314 win_amd64 wheel
+pandas>=3.0.6,<4           # cp314 wheel; pandas 3 semantics (CoW, "str" dtype) assumed
+pyyaml>=6.0.3              # cp314 wheel (import name: yaml)
+python-dotenv>=1.2.3       # loads .env (API keys live ONLY in .env, never in git)
+fastapi>=0.142.2           # read-only local dashboard
+uvicorn>=0.54.0            # ASGI server (plain; uvloop is not available on Windows)

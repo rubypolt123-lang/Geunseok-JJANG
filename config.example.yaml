@@ -1,0 +1,86 @@
+# ============================================================
+# binance-futures-bot 설정 파일
+# - 비밀값(API 키)은 절대 여기에 넣지 마세요. API 키는 .env 에만 둡니다.
+# - 경로는 이 파일이 있는 폴더 기준 상대경로입니다.
+# ============================================================
+
+# 실행 모드: paper(기본, 로컬 가상 체결, 키 불필요) | testnet(바이낸스 데모 트레이딩) | live(실거래)
+# live 는 이 값이 live 이고 동시에 환경변수 CONFIRM_LIVE_TRADING=YES 일 때만 실행됩니다(이중 확인).
+mode: paper
+
+# 거래 심볼 (USDT-M 무기한 선물)
+symbol: BTCUSDT
+# 캔들 간격: 1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d
+interval: 1h
+
+strategy:
+  name: ma_cross            # 등록된 전략 이름 (python -m bot strategies 로 목록 확인)
+  extra_modules: []         # 사용자 전략 모듈 import 경로 (예: ["user_strategies.my_rsi"])
+  params:
+    fast_period: 20         # 단기 이동평균 기간
+    slow_period: 50         # 장기 이동평균 기간 (fast_period 보다 커야 함)
+    ma_type: EMA            # SMA | EMA
+    allow_short: true       # false 면 데드크로스에서 롱 청산만 하고 숏 진입 안 함
+
+risk:
+  leverage: 3                     # 레버리지 (max_leverage 이하)
+  max_leverage: 10                # 허용 레버리지 상한 (코드 절대 상한 20)
+  risk_per_trade_pct: 1.0         # 1회 거래 위험 = 자산의 1% (손절 시 예상 손실액)
+  stop_loss:
+    mode: atr                     # percent | atr
+    percent: 2.0                  # mode=percent: 진입가 대비 손절 거리 %
+    atr_period: 14                # mode=atr: ATR 기간
+    atr_multiple: 2.0             # mode=atr: 손절 거리 = ATR x 배수
+  take_profit_r: 2.0              # 익절가 = 손절거리 x R (null 이면 익절 주문 없음)
+  max_position_notional: 20000    # 포지션 명목가치 절대 상한 (USDT). 자산이 커져도 이 값 이상으로는 커지지 않음
+  max_margin_fraction: 0.9        # 증거금 사용 상한 (자산 대비 비율)
+  max_daily_loss_pct: 5.0         # 일일(UTC 기준) 손실 한도 %, 도달 시 킬스위치 (0 = 비활성)
+  kill_switch_flatten: true       # 킬스위치 발동 시 보유 포지션 즉시 시장가 청산
+  cooldown_bars_after_stop: 3     # 손절/강제청산 후 신규 진입 금지 봉 수
+  min_liq_distance_multiple: 2.0  # (진입가~청산가 거리) >= (손절거리 x 이 값) 이어야 진입
+  maint_margin_rate: 0.004        # 유지증거금률 (청산가 근사용)
+  liq_mmr_buffer: 0.005           # 청산가 근사에 더하는 보수적 버퍼
+
+execution:
+  fees:
+    maker: 0.0002                 # 0.02 %
+    taker: 0.0005                 # 0.05 % (시장가·스탑 체결에 사용)
+  slippage_bps: 5                 # 시장가·스탑 체결의 불리한 슬리피지 (1bp = 0.01%)
+  working_type: MARK_PRICE        # 보호주문 트리거 기준: MARK_PRICE | CONTRACT_PRICE
+  price_protect: false            # true 면 마크가/최종가 괴리(BTC 5%) 시 손절이 발동하지 않을 수 있음 (기본 false 권장)
+  protective_mode: close_position # close_position | reduce_only (테스트넷 검증용 대체 방식)
+  candle_close_delay_sec: 3       # 캔들 마감 후 대기 시간(초)
+  kline_limit: 500                # 신호 계산용 캔들 수 (부족하면 자동으로 워밍업 x2 로 늘림, 최대 1500)
+  recv_window_ms: 5000            # 서명 요청 허용 시간창(ms)
+  heartbeat_sec: 30               # 하트비트 기록 및 보호주문 점검 주기(초)
+  bot_id: mab1                    # 주문 ID 접두사 (영문/숫자 1~8자). 같은 계정에서 봇을 여러 개 돌리면 봇마다 다르게
+
+paper:
+  initial_balance: 10000          # 페이퍼 모드 시작 잔고 (USDT)
+  include_funding: true           # 페이퍼 모드에서 실제 펀딩비 반영
+
+backtest:
+  start: "2024-01-01"             # 백테스트 시작일 (UTC)
+  end: null                       # 종료일, null = 현재
+  initial_balance: 10000
+  include_funding: true           # 과거 펀딩비 반영
+  results_dir: data/backtests
+
+data:
+  cache_dir: data                 # data/klines, data/funding, data/exchange_info 에 저장
+
+storage:
+  db_path: data/bot.db
+
+dashboard:
+  host: 127.0.0.1                 # 로컬 전용 (다른 주소는 거부됨)
+  port: 8000
+  refresh_sec: 10                 # 자동 새로고침 주기(초)
+
+logging:
+  level: INFO
+  dir: logs
+  max_bytes: 5242880              # 로그 파일 최대 크기 (5MB)
+  backup_count: 5
+
+halt_file: data/STOP              # 이 파일이 존재하면 신규 진입 중지 (기존 포지션/보호주문 유지)

@@ -1,0 +1,12 @@
+# Development / test dependencies (includes runtime deps).
+# Verified on CPython 3.14.6 win_amd64, 2026-09-30, binary wheels only.
+#
+# Install:
+#   .\.venv\Scripts\python.exe -m pip install --only-binary ":all:" -r requirements-dev.txt
+
+-r requirements.txt
+
+pytest>=9.1.1
+responses>=0.26.3          # mocks `requests` calls (no real network in unit tests)
+httpx2>=2.13.1             # HTTP client used by starlette 1.7 / fastapi.testclient.TestClient
+                           # (imported first; plain `httpx` is not needed and not used by any code)

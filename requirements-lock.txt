@@ -1,0 +1,39 @@
+# Exact versions installed in .venv on 2026-09-30 (CPython 3.14.6, win_amd64).
+# Every entry was installed from a binary wheel (pip --only-binary ":all:").
+# Reproduce:
+#   .\.venv\Scripts\python.exe -m pip install --only-binary ":all:" -r requirements-lock.txt
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+charset-normalizer==3.5.2
+click==8.5.0
+colorama==0.4.6
+fastapi==0.142.2
+h11==0.16.0
+httpcore2==2.13.1
+httpx2==2.13.1
+idna==3.20
+iniconfig==2.3.0
+numpy==2.5.3
+opentelemetry-api==1.45.0
+packaging==26.3
+pandas==3.0.6
+pluggy==1.6.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+Pygments==2.21.0
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+PyYAML==6.0.3
+requests==2.34.2
+responses==0.26.3
+six==1.17.0
+starlette==1.7.0
+truststore==0.10.4
+typing_extensions==4.16.0
+typing-inspection==0.4.4
+tzdata==2026.4
+urllib3==2.8.0
+uvicorn==0.54.0
