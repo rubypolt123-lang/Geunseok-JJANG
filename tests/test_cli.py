@@ -252,3 +252,23 @@ def test_strategies_lists_ma_cross(tmp_path: Path, capsys: pytest.CaptureFixture
     out = capsys.readouterr().out
     assert "  - ma_cross: fast_period=20, slow_period=50, ma_type=EMA, allow_short=True" in out
     assert "ma_cross (fast_period=20, slow_period=50, ma_type=EMA, allow_short=True)" in out  # configured
+
+
+class _StopRecorder:
+    def __init__(self) -> None:
+        self.stops = 0
+
+    def request_stop(self) -> None:
+        self.stops += 1
+
+
+@pytest.mark.parametrize("text", ["hello\n STOP \nignored\n", "", "anything\n"])
+def test_stdin_stop_watcher(text: str) -> None:
+    # a "stop" line or the end of input (the launcher closed) both request a stop, exactly once
+    trader = _StopRecorder()
+    cli.watch_stdin_for_stop(io.StringIO(text), trader)  # type: ignore[arg-type]
+    assert trader.stops == 1
+
+    trader = _StopRecorder()
+    cli._start_stdin_watcher(None, trader)  # type: ignore[arg-type]
+    assert trader.stops == 1  # no stdin at all: never run unsupervised

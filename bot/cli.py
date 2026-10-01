@@ -11,10 +11,11 @@ import argparse
 import dataclasses
 import logging
 import sys
+import threading
 import traceback
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, TextIO
 
 import pandas as pd
 import yaml
@@ -53,6 +54,7 @@ from bot.timeutil import interval_to_ms, ms_to_iso, now_ms, parse_date_ms
 from bot.trader import (
     LOCK_FILE,
     SingleInstanceLock,
+    Trader,
     active_trade_key,
     build_trader,
     cooldown_key,
@@ -67,6 +69,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG: Final = "config.yaml"
 LOG_LEVEL_CHOICES: Final[tuple[str, ...]] = ("DEBUG", "INFO", "WARNING", "ERROR")
 DEFAULT_FUNDING_INTERVAL_MS: Final = 28_800_000  # 8 h
+STDIN_STOP_COMMAND: Final = "stop"
 
 EXIT_OK: Final = 0
 EXIT_ERROR: Final = 1
@@ -159,6 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="실행 모드 덮어쓰기 (live 는 설정 파일에서만 가능)",
     )
     p.add_argument("--reset-paper", action="store_true", help="페이퍼 모드 상태(잔고/포지션) 초기화 후 실행")
+    p.add_argument(
+        "--stop-on-stdin",
+        action="store_true",
+        help="표준입력의 'stop' 줄 또는 입력 종료(EOF) 시 Ctrl+C 처럼 안전하게 멈춤 (실행 창/런처용)",
+    )
 
     p = sub.add_parser("dashboard", parents=[common], help="읽기 전용 웹 대시보드 (로컬 전용)")
     p.add_argument("--host", help="바인드 주소 (127.0.0.1 / localhost / ::1 만 허용)")
@@ -230,6 +238,30 @@ def reset_paper_state(storage: Storage, symbol: str) -> list[str]:
     storage.log_event("WARNING", mode.value, "PAPER_RESET", f"paper state of {symbol} reset (--reset-paper)")
     logger.warning("paper state of %s reset (--reset-paper)", symbol)
     return keys
+
+
+def watch_stdin_for_stop(stream: Iterable[str], trader: Trader) -> None:
+    """``--stop-on-stdin``: a ``stop`` line, or the end of input (the launcher closed or crashed), requests a stop.
+
+    Same semantics as Ctrl+C: only sets the trader's stop flag, so an order sequence in progress is completed.
+    """
+    try:
+        for line in stream:
+            if line.strip().lower() == STDIN_STOP_COMMAND:
+                logger.warning("stop requested on stdin")
+                break
+        else:
+            logger.warning("stdin closed; stopping")
+    except (OSError, ValueError) as exc:  # closed/unreadable stdin: stopping is the safe side
+        logger.warning("stdin unreadable (%s); stopping", exc)
+    trader.request_stop()
+
+
+def _start_stdin_watcher(stream: TextIO | None, trader: Trader) -> None:
+    if stream is None:  # pythonw without a stdin handle: nothing to watch, stop at once (never run unsupervised)
+        trader.request_stop()
+        return
+    threading.Thread(target=watch_stdin_for_stop, args=(stream, trader), name="stdin-stop", daemon=True).start()
 
 
 def funding_coverage_problem(funding: pd.DataFrame | None, start_ms: int, candles: pd.DataFrame) -> str | None:
@@ -418,6 +450,8 @@ def _cmd_trade(args: argparse.Namespace) -> int:
                 reset_paper_state(st, cfg.symbol)
                 _out(f"페이퍼 상태 초기화 / paper state reset: {cfg.symbol}")
             trader = build_trader(cfg, st)
+            if args.stop_on_stdin:
+                _start_stdin_watcher(sys.stdin, trader)
             try:
                 trader.run_forever(max_iterations=1 if args.once else None)
             finally:
