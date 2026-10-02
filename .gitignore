@@ -9,3 +9,11 @@ data/
 logs/
 .pytest_cache/
 *.tmp
+
+# chart_analyzer 가 만든 차트 분석 보고서
+chart_reports/
+
+# 투자관리 엑셀 (개인 거래기록이 들어가므로 git 에 올리지 않습니다)
+/투자관리.xlsx
+/~투자관리.tmp.xlsx
+/투자관리_백업/

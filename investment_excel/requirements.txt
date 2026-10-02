@@ -1,0 +1,2 @@
+# investment_excel (투자관리 엑셀) 의존성 — 시세는 파이썬 기본 기능(urllib)으로 받습니다
+openpyxl>=3.1.5

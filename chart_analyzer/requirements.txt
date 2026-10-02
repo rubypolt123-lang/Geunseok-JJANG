@@ -1,0 +1,5 @@
+# chart_analyzer (차트 캡처 분석기) 의존성
+#   .\.venv\Scripts\python.exe -m pip install --only-binary ":all:" -r chart_analyzer\requirements.txt
+anthropic>=1.11,<2         # Claude API (이미지 분석, structured outputs)
+pillow>=12.0               # 클립보드 캡처 읽기, 이미지 크기 조정
+python-dotenv>=1.2.3       # .env 에서 ANTHROPIC_API_KEY 읽기
