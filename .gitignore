@@ -9,3 +9,6 @@ data/
 logs/
 .pytest_cache/
 *.tmp
+
+# chart_analyzer 가 만든 차트 분석 보고서
+chart_reports/
