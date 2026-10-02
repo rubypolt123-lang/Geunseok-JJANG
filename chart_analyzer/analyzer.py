@@ -110,3 +110,41 @@ def analyze_chart(
         output_tokens=response.usage.output_tokens,
         request_id=getattr(response, "_request_id", None),
     )
+
+
+def describe_error(exc: BaseException) -> str:
+    """분석·API 오류를 사용자에게 보여줄 문장으로 바꿉니다. 예상하지 못한 오류는 그대로 다시 올립니다."""
+    if isinstance(exc, AnalysisError):
+        return str(exc)
+    if isinstance(exc, anthropic.AuthenticationError):
+        return "API 키가 올바르지 않습니다. 'API 키 설정'에서 키를 다시 넣어 주세요."
+    if isinstance(exc, TypeError) and "authentication method" in str(exc):
+        # 키가 아예 없으면 SDK 가 요청을 만들기 전에 TypeError 를 냅니다.
+        return "API 키가 없습니다. 'API 키 설정'에서 키를 넣어 주세요 (.env 의 ANTHROPIC_API_KEY)."
+    if isinstance(exc, anthropic.PermissionDeniedError):
+        return "이 API 키로는 분석 모델을 쓸 권한이 없습니다."
+    if isinstance(exc, anthropic.RateLimitError):
+        return "요청 한도를 넘었습니다. 잠시 후 다시 시도하세요. (크레딧 잔액도 확인해 보세요)"
+    if isinstance(exc, anthropic.BadRequestError):
+        if "credit" in exc.message.lower():
+            return "API 크레딧이 부족합니다. Claude 콘솔의 Billing 에서 크레딧을 충전하세요."
+        return f"요청이 거부되었습니다: {exc.message}"
+    if isinstance(exc, anthropic.APIStatusError):
+        return f"API 서버 오류({exc.status_code}). 잠시 후 다시 시도하세요."
+    if isinstance(exc, anthropic.APIConnectionError):
+        return "Claude 서버에 연결하지 못했습니다. 인터넷 연결을 확인하세요."
+    if isinstance(exc, anthropic.AnthropicError):
+        return f"API 설정 오류: {exc}"
+    raise exc
+
+
+def check_api_key(key: str, *, client: anthropic.Anthropic | None = None) -> str | None:
+    """키로 모델 정보를 한 번 조회해 봅니다(요금 없음). 문제가 없으면 None, 있으면 안내 문장."""
+    client = client or anthropic.Anthropic(api_key=key.strip(), max_retries=1, timeout=20)
+    try:
+        client.models.retrieve(DEFAULT_MODEL)
+    except anthropic.NotFoundError:
+        return "키는 맞지만 이 계정에서 분석 모델을 찾을 수 없습니다."
+    except anthropic.AnthropicError as exc:
+        return describe_error(exc)
+    return None

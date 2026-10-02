@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import sys
+import types
+
 import anthropic
 import httpx2
 import pytest
 
-from chart_analyzer import cli
+from chart_analyzer import cli, settings, shortcut
 from chart_analyzer.analyzer import AnalysisError
 from chart_analyzer.imaging import ClipboardSource
 
@@ -28,7 +31,20 @@ def test_parser_defaults():
     assert args.model == "claude-opus-5-5"
     assert args.effort == "high"
     assert args.folder == [] and args.no_clipboard is False
-    assert str(args.out) == "chart_reports"
+    assert args.out == settings.REPORTS_DIR
+
+
+def test_no_command_opens_window(monkeypatch):
+    # tkinter 가 없는 환경에서도 돌도록 창 모듈 자체를 가짜로 바꿉니다.
+    monkeypatch.setitem(sys.modules, "chart_analyzer.app", types.SimpleNamespace(run=lambda: 7))
+    assert cli.main([]) == 7
+    assert cli.main(["gui"]) == 7
+
+
+def test_shortcut_command_explains_failure(monkeypatch, capsys):
+    monkeypatch.setattr(shortcut.sys, "platform", "linux")
+    assert cli.main(["shortcut"]) == 1
+    assert "윈도우에서만" in capsys.readouterr().out
 
 
 def test_file_command_writes_report(tmp_path, chart_image):
@@ -84,7 +100,7 @@ def test_watch_without_sources_exits(tmp_path):
                 response=httpx2.Response(401, request=httpx2.Request("POST", "https://api.anthropic.com")),
                 body=None,
             ),
-            "ANTHROPIC_API_KEY",
+            "API 키가 올바르지 않습니다",
         ),
         (anthropic.APIConnectionError(request=httpx2.Request("POST", "https://api.anthropic.com")), "인터넷"),
         (TypeError('"Could not resolve authentication method. Expected one of api_key"'), "API 키가 없습니다"),

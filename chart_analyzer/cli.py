@@ -1,4 +1,7 @@
-"""명령줄 진입점: ``python -m chart_analyzer {watch,clip,file}``."""
+"""명령줄 진입점.
+
+``python -m chart_analyzer`` 만 실행하면 창(GUI)이 뜨고, ``watch`` / ``clip`` / ``file`` 은 콘솔용입니다.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +12,8 @@ import webbrowser
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-import anthropic
-
-from . import analyzer
-from .analyzer import AnalysisError, AnalysisResult
+from . import analyzer, settings
+from .analyzer import AnalysisResult, describe_error
 from .imaging import (
     Capture,
     ClipboardSource,
@@ -24,41 +25,7 @@ from .imaging import (
 )
 from .report import BIAS_LABEL, SavedReport, save_report
 
-DEFAULT_OUT_DIR = Path("chart_reports")
-
 AnalyzeFn = Callable[..., AnalysisResult]
-
-
-def _load_dotenv() -> None:
-    """프로젝트 폴더의 .env 에서 ANTHROPIC_API_KEY 를 읽습니다(python-dotenv 가 있을 때만)."""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return
-    load_dotenv()
-
-
-def _describe_api_error(exc: Exception) -> str:
-    if isinstance(exc, AnalysisError):
-        return str(exc)
-    if isinstance(exc, anthropic.AuthenticationError):
-        return "API 키가 잘못되었습니다. .env 의 ANTHROPIC_API_KEY 를 확인하세요."
-    if isinstance(exc, TypeError) and "authentication method" in str(exc):
-        # 키가 아예 없으면 SDK 가 요청을 만들기 전에 TypeError 를 냅니다.
-        return "API 키가 없습니다. 프로젝트 폴더의 .env 에 ANTHROPIC_API_KEY 를 넣으세요."
-    if isinstance(exc, anthropic.PermissionDeniedError):
-        return "이 API 키로는 해당 모델을 쓸 권한이 없습니다."
-    if isinstance(exc, anthropic.RateLimitError):
-        return "요청 한도를 넘었습니다. 잠시 후 다시 시도하세요."
-    if isinstance(exc, anthropic.BadRequestError):
-        return f"요청이 거부되었습니다: {exc.message}"
-    if isinstance(exc, anthropic.APIStatusError):
-        return f"API 오류({exc.status_code}): {exc.message}"
-    if isinstance(exc, anthropic.APIConnectionError):
-        return "Anthropic API 에 연결하지 못했습니다. 인터넷 연결을 확인하세요."
-    if isinstance(exc, anthropic.AnthropicError):
-        return f"API 설정 오류: {exc}"
-    raise exc
 
 
 def process_capture(
@@ -73,7 +40,7 @@ def process_capture(
     try:
         result = analyze(image, note=args.note, model=args.model, effort=args.effort)
     except Exception as exc:  # noqa: BLE001 - 사용자에게 보여줄 메시지로 바꿉니다
-        print(f"✖ 분석 실패: {_describe_api_error(exc)}", flush=True)
+        print(f"✖ 분석 실패: {describe_error(exc)}", flush=True)
         return None
 
     try:
@@ -157,10 +124,22 @@ def cmd_file(args: argparse.Namespace, analyze: AnalyzeFn = analyzer.analyze_cha
     return 1 if failures else 0
 
 
+def cmd_shortcut() -> int:
+    from .shortcut import SHORTCUT_NAME, create_desktop_shortcut
+
+    try:
+        create_desktop_shortcut()
+    except (RuntimeError, OSError) as exc:
+        print(f"바탕화면 바로가기를 만들지 못했습니다: {exc}")
+        return 1
+    print(f"바탕화면에 '{SHORTCUT_NAME}' 바로가기를 만들었습니다.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--note", help="분석에 참고할 메모. 예: \"BTC 4시간봉, 롱 진입 고민 중\"")
-    common.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR, help="보고서 저장 폴더 (기본: chart_reports)")
+    common.add_argument("--out", type=Path, default=settings.REPORTS_DIR, help="보고서 저장 폴더 (기본: chart_reports)")
     common.add_argument("--model", choices=analyzer.MODEL_CHOICES, default=analyzer.DEFAULT_MODEL, help="분석 모델")
     common.add_argument(
         "--effort", choices=analyzer.EFFORT_CHOICES, default=analyzer.DEFAULT_EFFORT,
@@ -172,7 +151,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m chart_analyzer",
         description="차트 캡처 이미지를 Claude 로 분석해 보고서(HTML/Markdown)로 저장합니다.",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("gui", help="차트 분석기 창을 엽니다 (아무 명령 없이 실행해도 같음)")
+    sub.add_parser("shortcut", help="바탕화면에 '차트 분석기' 바로가기를 만듭니다 (윈도우)")
 
     watch = sub.add_parser("watch", parents=[common], help="캡처를 감시하다가 새 차트가 들어오면 자동 분석")
     watch.add_argument("--folder", type=Path, action="append", default=[], help="새 이미지 파일을 감시할 폴더 (여러 번 지정 가능)")
@@ -191,8 +172,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8", errors="replace")
-    _load_dotenv()
+    settings.load_env()
     args = build_parser().parse_args(argv)
+    if args.command in (None, "gui"):
+        from .app import run
+
+        return run()
+    if args.command == "shortcut":
+        return cmd_shortcut()
     if args.command == "watch":
         return cmd_watch(args)
     if args.command == "clip":

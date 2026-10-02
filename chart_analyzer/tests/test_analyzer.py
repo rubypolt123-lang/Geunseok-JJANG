@@ -141,3 +141,35 @@ def test_wire_request_through_real_sdk(chart_image):
     assert body["output_config"]["format"]["schema"]["required"][0] == "is_chart"
     assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert result.analysis.title.startswith("BTCUSDT")
+
+
+def _models_client(status: int) -> anthropic.Anthropic:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path.endswith("/v1/models/claude-opus-5-5")
+        if status == 200:
+            body = {"id": "claude-opus-5-5", "type": "model", "display_name": "Claude Opus 5.5",
+                    "created_at": "2026-01-01T00:00:00Z"}
+        else:
+            body = {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}
+        return httpx2.Response(status, json=body)
+
+    return anthropic.Anthropic(
+        api_key="sk-ant-test",
+        base_url="https://api.anthropic.com",
+        max_retries=0,
+        http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)),
+    )
+
+
+def test_check_api_key_accepts_working_key():
+    assert analyzer.check_api_key("sk-ant-test", client=_models_client(200)) is None
+
+
+def test_check_api_key_explains_bad_key():
+    message = analyzer.check_api_key("sk-ant-test", client=_models_client(401))
+    assert message is not None and "올바르지 않습니다" in message
+
+
+def test_describe_error_reraises_unexpected():
+    with pytest.raises(ZeroDivisionError):
+        analyzer.describe_error(ZeroDivisionError())

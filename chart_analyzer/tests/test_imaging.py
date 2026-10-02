@@ -111,3 +111,23 @@ def test_folder_source_missing_folder_is_quiet(tmp_path):
     source = FolderSource(tmp_path / "missing")
     source.prime()
     assert source.poll() == []
+
+
+def test_clipboard_source_skips_reading_when_sequence_unchanged(chart_image):
+    other = make_chart_image(400, 300)
+    grabs = []
+    images = iter([chart_image, None, other])
+    seqs = iter([5, 5, 6, 7, 7])
+
+    def grab():
+        grabs.append(1)
+        return next(images)
+
+    source = ClipboardSource(grab=grab, sequence=lambda: next(seqs))
+    source.prime()  # seq 5, 기존 이미지
+    assert source.poll() == []  # seq 5 그대로 → 클립보드를 읽지 않음
+    assert len(grabs) == 1
+    assert source.poll() == []  # seq 6, 이미지를 못 읽음 → 다음에 다시 시도
+    assert len(source.poll()) == 1  # seq 7, 새 캡처
+    assert source.poll() == []  # seq 7 그대로
+    assert len(grabs) == 3

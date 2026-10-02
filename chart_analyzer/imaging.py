@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,6 +92,18 @@ def grab_clipboard_image() -> Image.Image | None:
     return None
 
 
+def clipboard_sequence() -> int | None:
+    """윈도우 클립보드 변경 번호. 내용이 바뀔 때마다 커집니다. 윈도우가 아니면 None."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        return int(ctypes.windll.user32.GetClipboardSequenceNumber())
+    except (OSError, AttributeError):
+        return None
+
+
 @dataclass
 class Capture:
     image: Image.Image
@@ -100,19 +113,32 @@ class Capture:
 class ClipboardSource:
     """클립보드에 새 이미지가 들어오면 알려줍니다 (Win+Shift+S, PrtSc 등)."""
 
-    def __init__(self, grab: Callable[[], Image.Image | None] = grab_clipboard_image) -> None:
+    def __init__(
+        self,
+        grab: Callable[[], Image.Image | None] = grab_clipboard_image,
+        sequence: Callable[[], int | None] = clipboard_sequence,
+    ) -> None:
         self._grab = grab
+        self._sequence = sequence
         self._last: str | None = None
+        self._last_seq: int | None = None
 
     def prime(self) -> None:
         """시작 시점에 이미 클립보드에 있던 이미지는 분석하지 않도록 기억해 둡니다."""
+        self._last_seq = self._sequence()
         img = self._grab()
         self._last = fingerprint(img) if img is not None else None
 
     def poll(self) -> list[Capture]:
+        # 윈도우에서는 클립보드가 바뀌지 않았으면 이미지를 읽지 않습니다(4K 캡처도 가볍게).
+        seq = self._sequence()
+        if seq is not None and seq == self._last_seq:
+            return []
         img = self._grab()
         if img is None:
+            # 다른 프로그램이 클립보드를 잡고 있었을 수도 있으니 변경 번호는 기억하지 않고 다음에 다시 봅니다.
             return []
+        self._last_seq = seq
         fp = fingerprint(img)
         if fp == self._last:
             return []

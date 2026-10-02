@@ -367,27 +367,52 @@ def save_report(
     return SavedReport(html=html_path, markdown=md_path, json=json_path, image=image_path)
 
 
-def write_index(out_dir: Path) -> Path:
-    """저장된 보고서 목록 페이지(index.html)를 최신순으로 다시 만듭니다."""
-    rows: list[str] = []
+@dataclass(frozen=True)
+class ReportEntry:
+    created: str  # "YYYY-MM-DD HH:MM"
+    title: str
+    instrument: str | None
+    timeframe: str | None
+    bias: str
+    html: Path
+
+
+def list_reports(out_dir: Path) -> list[ReportEntry]:
+    """저장된 보고서를 최신순으로 돌려줍니다. 깨진 JSON 은 건너뜁니다."""
+    entries: list[ReportEntry] = []
+    if not out_dir.is_dir():
+        return entries
     for json_path in sorted(out_dir.glob("*.json"), reverse=True):
         try:
             data = json.loads(json_path.read_text(encoding="utf-8"))
             a = data["analysis"]
-            bias = a["overall_bias"]
-            created = data["created"].replace("T", " ")[:16]
-        except (OSError, ValueError, KeyError, TypeError):
+            entries.append(
+                ReportEntry(
+                    created=data["created"].replace("T", " ")[:16],
+                    title=a.get("title") or json_path.stem,
+                    instrument=a.get("instrument"),
+                    timeframe=a.get("timeframe"),
+                    bias=a["overall_bias"],
+                    html=json_path.with_suffix(".html"),
+                )
+            )
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             continue
-        html_name = json_path.with_suffix(".html").name
-        rows.append(
-            "<tr>"
-            f"<td class=\"num\">{escape(created)}</td>"
-            f'<td><a href="{escape(html_name)}">{escape(a.get("title") or html_name)}</a></td>'
-            f"<td>{escape(a.get('instrument') or '-')}</td>"
-            f"<td>{escape(a.get('timeframe') or '-')}</td>"
-            f"<td>{_badge(BIAS_LABEL.get(bias, bias), _tone(bias))}</td>"
-            "</tr>"
-        )
+    return entries
+
+
+def write_index(out_dir: Path) -> Path:
+    """저장된 보고서 목록 페이지(index.html)를 최신순으로 다시 만듭니다."""
+    rows = [
+        "<tr>"
+        f"<td class=\"num\">{escape(e.created)}</td>"
+        f'<td><a href="{escape(e.html.name)}">{escape(e.title)}</a></td>'
+        f"<td>{escape(e.instrument or '-')}</td>"
+        f"<td>{escape(e.timeframe or '-')}</td>"
+        f"<td>{_badge(BIAS_LABEL.get(e.bias, e.bias), _tone(e.bias))}</td>"
+        "</tr>"
+        for e in list_reports(out_dir)
+    ]
     table = (
         '<div class="table-wrap"><table><thead><tr><th>작성</th><th>제목</th><th>종목</th><th>봉</th><th>판단</th>'
         f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
